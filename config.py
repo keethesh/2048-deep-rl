@@ -16,16 +16,16 @@ FAST_MODE = True
 # ============================================================================
 
 if FAST_MODE:
-    NUM_EPISODES = 1000         # Sufficient for learning
-    BATCH_SIZE = 32             # ❗ SMALLER = more stable updates (was 128)
-    LEARNING_RATE = 0.00005     # ❗ MUCH LOWER = stable convergence (was 0.0003)
-    EPSILON_DECAY = 0.998       # ❗ SLOWER = explores longer (was 0.99)
-    TARGET_UPDATE_FREQ = 5      # ❗ MORE FREQUENT = better sync (was 20)
+    NUM_EPISODES = 5000         # INCREASED: Need more episodes to reach 2048
+    BATCH_SIZE = 32             # SMALLER = more stable updates (was 128)
+    LEARNING_RATE = 0.00003     # LOWER: More stable for complex strategies (was 0.00005)
+    EPSILON_DECAY = 0.9995      # MUCH SLOWER: Explore 5x longer to find 2048 strategies (was 0.998)
+    TARGET_UPDATE_FREQ = 5      # MORE FREQUENT = better sync (was 20)
     EVAL_FREQ = 100             # Less frequent evaluation
-    EVAL_EPISODES = 3           # Faster evaluation
+    EVAL_EPISODES = 10          # INCREASED: Better evaluation signal (was 3)
     SAVE_FREQ = 200             # Less frequent saves
-    LOG_FREQ = 10               # Less console spam
-    MEMORY_SIZE = 50000         # ❗ LARGER = more diversity (was 20000)
+    LOG_FREQ = 20               # Reduce console spam for longer training
+    MEMORY_SIZE = 100000        # DOUBLED: More diverse experiences (was 50000)
 else:
     NUM_EPISODES = 5000         # Full training
     BATCH_SIZE = 64             # Standard batch size
@@ -41,18 +41,18 @@ else:
 # Common hyperparameters
 GAMMA = 0.99
 EPSILON_START = 1.0
-EPSILON_MIN = 0.05              # ❗ HIGHER minimum (was 0.01) - keeps some exploration
+EPSILON_MIN = 0.01              # LOWER: Allow more exploitation once strategies are learned (was 0.05)
 
 # ============================================================================
 # NETWORK ARCHITECTURE - FIXED FOR SUFFICIENT CAPACITY
 # ============================================================================
 
 if FAST_MODE:
-    CONV_FILTERS = 128          # ❗ LARGER network (was 64) - can actually learn!
-    FC_SIZE = 256               # ❗ LARGER layers (was 128) - more capacity
+    CONV_FILTERS = 256          # DOUBLED: More pattern recognition for complex 2048 strategies (was 128)
+    FC_SIZE = 512               # DOUBLED: More decision-making capacity (was 256)
 else:
-    CONV_FILTERS = 128          # Larger, more powerful network
-    FC_SIZE = 256               # Larger fully connected layers
+    CONV_FILTERS = 256          # Larger, more powerful network
+    FC_SIZE = 512               # Larger fully connected layers
 
 # ============================================================================
 # OPTIMIZATION SETTINGS
@@ -142,23 +142,26 @@ def print_config():
     print(f"Gradient Clipping: {MAX_GRAD_NORM}")
     print("=" * 70)
     print()
-    print("CHANGES FROM ORIGINAL CONFIG:")
+    print("OPTIMIZATIONS FOR REACHING 2048:")
+    print("  - Episodes: 1000 -> 5000 (5x more training)")
     print("  - Batch size: 128 -> 32 (more stable updates)")
-    print("  - Learning rate: 0.0003 -> 0.00005 (5x more stable)")
-    print("  - Epsilon decay: 0.99 -> 0.998 (explores 5x longer)")
+    print("  - Learning rate: 0.0003 -> 0.00003 (10x more stable)")
+    print("  - Epsilon decay: 0.998 -> 0.9995 (explores MUCH longer)")
+    print("  - Epsilon min: 0.05 -> 0.01 (more exploitation)")
     print("  - Target update: 20 -> 5 (4x more frequent sync)")
-    print("  - Memory: 20k -> 50k (2.5x more diversity)")
-    print("  - Network: 64 -> 128 filters (2x capacity)")
-    print("  - FC size: 128 -> 256 (2x capacity)")
+    print("  - Memory: 20k -> 100k (5x more diversity)")
+    print("  - Network: 64 -> 256 filters (4x capacity)")
+    print("  - FC size: 128 -> 512 (4x capacity)")
+    print("  - Eval episodes: 3 -> 10 (better evaluation signal)")
     print("=" * 70)
     print()
 
 # Estimated training time
 if FAST_MODE:
     if USE_CUDA:
-        print(f"Estimated training time: 15-25 minutes (GPU)")
+        print(f"Estimated training time: 60-90 minutes (GPU)")
     else:
-        print(f"Estimated training time: 1.5-2.5 hours (CPU)")
+        print(f"Estimated training time: 4-6 hours (CPU)")
 else:
     if USE_CUDA:
         print(f"Estimated training time: 30-60 minutes (GPU)")
