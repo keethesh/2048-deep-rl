@@ -986,13 +986,21 @@ n_step_buffer = NStepBuffer(n_steps=n_steps, gamma=gamma)
 # Mixed precision training (GPU only)
 use_amp = USE_CONFIG and USE_MIXED_PRECISION and device.type == "cuda"
 if use_amp:
-    from torch.cuda.amp import autocast, GradScaler
-    scaler = GradScaler()
+    scaler = torch.amp.GradScaler("cuda")
     print("Mixed precision training: ENABLED")
 else:
     scaler = None
     if USE_CONFIG:
         print("Mixed precision training: DISABLED (CPU or disabled in config)")
+
+
+def apply_action_mask(q_values, valid_mask):
+    """
+    Mask invalid actions using a dtype-safe floor value.
+    Avoids fp16 overflow when masking with large negative constants.
+    """
+    mask_value = torch.finfo(q_values.dtype).min
+    return q_values.masked_fill(~valid_mask, mask_value)
 
 # TensorBoard
 timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1052,7 +1060,7 @@ def choose_action(state, epsilon, valid_actions=None):
         q_network.eval()
     with torch.inference_mode():
         if use_amp:
-            with autocast():
+            with torch.amp.autocast("cuda"):
                 q_values = q_network(state_tensor)
         else:
             q_values = q_network(state_tensor)
@@ -1064,7 +1072,7 @@ def choose_action(state, epsilon, valid_actions=None):
         valid_idx = torch.as_tensor(valid_actions, dtype=torch.long, device=device)
         valid_mask = torch.zeros(action_dim, dtype=torch.bool, device=device)
         valid_mask[valid_idx] = True
-        masked_q = q_values.squeeze(0).masked_fill(~valid_mask, -1e9)
+        masked_q = apply_action_mask(q_values.squeeze(0), valid_mask)
         return int(masked_q.argmax().item())
 
     return int(q_values.argmax(dim=1).item())
@@ -1096,14 +1104,14 @@ def train_step():
 
     # Use mixed precision if enabled
     if use_amp:
-        with autocast():
+        with torch.amp.autocast("cuda"):
             # Current Q values
             current_q_values = q_network(states).gather(1, actions.unsqueeze(1)).squeeze(1)
 
             # Double DQN with next-state valid-action masking
             with torch.no_grad():
                 next_policy_q_values = q_network(next_states)
-                masked_next_policy_q_values = next_policy_q_values.masked_fill(~next_valid_masks, -1e9)
+                masked_next_policy_q_values = apply_action_mask(next_policy_q_values, next_valid_masks)
                 next_actions = masked_next_policy_q_values.argmax(dim=1, keepdim=True)
                 next_q_values = target_network(next_states).gather(1, next_actions).squeeze(1)
                 next_q_values = next_q_values * has_valid_next_action
@@ -1131,7 +1139,7 @@ def train_step():
         # Double DQN with next-state valid-action masking
         with torch.no_grad():
             next_policy_q_values = q_network(next_states)
-            masked_next_policy_q_values = next_policy_q_values.masked_fill(~next_valid_masks, -1e9)
+            masked_next_policy_q_values = apply_action_mask(next_policy_q_values, next_valid_masks)
             next_actions = masked_next_policy_q_values.argmax(dim=1, keepdim=True)
             next_q_values = target_network(next_states).gather(1, next_actions).squeeze(1)
             next_q_values = next_q_values * has_valid_next_action
