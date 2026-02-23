@@ -273,9 +273,13 @@ class PPOConfig:
     minibatch_size: int
     gamma: float
     gae_lambda: float
-    clip_coef: float
+    clip_coef_start: float
+    clip_coef_end: float
     ent_coef_start: float
     ent_coef_end: float
+    target_kl_start: float
+    target_kl_end: float
+    late_phase_start: float
     vf_coef: float
     max_grad_norm: float
     learning_rate_start: float
@@ -299,9 +303,13 @@ def get_default_config(colab_profile):
             minibatch_size=1024,
             gamma=0.99,
             gae_lambda=0.95,
-            clip_coef=0.2,
+            clip_coef_start=0.2,
+            clip_coef_end=0.08,
             ent_coef_start=0.01,
-            ent_coef_end=0.001,
+            ent_coef_end=0.0005,
+            target_kl_start=0.03,
+            target_kl_end=0.008,
+            late_phase_start=0.6,
             vf_coef=0.5,
             max_grad_norm=0.5,
             learning_rate_start=3e-4,
@@ -322,9 +330,13 @@ def get_default_config(colab_profile):
         minibatch_size=256,
         gamma=0.99,
         gae_lambda=0.95,
-        clip_coef=0.2,
+        clip_coef_start=0.2,
+        clip_coef_end=0.1,
         ent_coef_start=0.01,
         ent_coef_end=0.001,
+        target_kl_start=0.03,
+        target_kl_end=0.01,
+        late_phase_start=0.65,
         vf_coef=0.5,
         max_grad_norm=0.5,
         learning_rate_start=3e-4,
@@ -348,6 +360,15 @@ def linear_schedule(start_value, end_value, progress):
     """Linear interpolation from start to end, progress in [0, 1]."""
     p = float(np.clip(progress, 0.0, 1.0))
     return start_value + p * (end_value - start_value)
+
+
+def two_phase_schedule(start_value, mid_value, end_value, progress, late_phase_start):
+    """Piecewise-linear schedule with a slower, stabilization-focused late phase."""
+    p = float(np.clip(progress, 0.0, 1.0))
+    late_p = float(np.clip(late_phase_start, 1e-6, 0.999999))
+    if p <= late_p:
+        return linear_schedule(start_value, mid_value, p / late_p)
+    return linear_schedule(mid_value, end_value, (p - late_p) / (1.0 - late_p))
 
 
 def evaluate_policy(model, device, n_episodes=10, seed=10_000):
@@ -424,6 +445,7 @@ def train_ppo(args):
     print(
         f"LR: {cfg.learning_rate_start} -> {cfg.learning_rate_end} | "
         f"Entropy: {cfg.ent_coef_start} -> {cfg.ent_coef_end} | "
+        f"Clip: {cfg.clip_coef_start} -> {cfg.clip_coef_end} | "
         f"Epochs: {cfg.update_epochs} | Minibatch: {cfg.minibatch_size}"
     )
     print("=" * 72)
@@ -480,8 +502,22 @@ def train_ppo(args):
 
     for update in range(start_update, n_updates + 1):
         update_progress = update / max(n_updates, 1)
-        current_lr = linear_schedule(cfg.learning_rate_start, cfg.learning_rate_end, update_progress)
-        current_ent_coef = linear_schedule(cfg.ent_coef_start, cfg.ent_coef_end, update_progress)
+        current_lr = two_phase_schedule(
+            start_value=cfg.learning_rate_start,
+            mid_value=max(cfg.learning_rate_end * 2.0, 1.0e-4),
+            end_value=cfg.learning_rate_end,
+            progress=update_progress,
+            late_phase_start=cfg.late_phase_start,
+        )
+        current_ent_coef = two_phase_schedule(
+            start_value=cfg.ent_coef_start,
+            mid_value=max(cfg.ent_coef_end * 2.0, 0.002),
+            end_value=cfg.ent_coef_end,
+            progress=update_progress,
+            late_phase_start=cfg.late_phase_start,
+        )
+        current_clip_coef = linear_schedule(cfg.clip_coef_start, cfg.clip_coef_end, update_progress)
+        current_target_kl = linear_schedule(cfg.target_kl_start, cfg.target_kl_end, update_progress)
         for group in optimizer.param_groups:
             group["lr"] = current_lr
 
@@ -557,6 +593,9 @@ def train_ppo(args):
         policy_loss_epoch = 0.0
         value_loss_epoch = 0.0
         entropy_epoch = 0.0
+        approx_kl_epoch = 0.0
+        kl_steps = 0
+        stop_early_for_kl = False
 
         for _ in range(cfg.update_epochs):
             np.random.shuffle(idxs)
@@ -580,11 +619,17 @@ def train_ppo(args):
                         entropy = dist.entropy().mean()
 
                         ratio = torch.exp(new_logprobs - mb_old_logprobs)
+                        log_ratio = new_logprobs - mb_old_logprobs
+                        approx_kl = ((ratio - 1.0) - log_ratio).mean()
                         pg_loss1 = -mb_adv * ratio
-                        pg_loss2 = -mb_adv * torch.clamp(ratio, 1.0 - cfg.clip_coef, 1.0 + cfg.clip_coef)
+                        pg_loss2 = -mb_adv * torch.clamp(
+                            ratio, 1.0 - current_clip_coef, 1.0 + current_clip_coef
+                        )
                         policy_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-                        value_pred_clipped = mb_old_values + (values - mb_old_values).clamp(-cfg.clip_coef, cfg.clip_coef)
+                        value_pred_clipped = mb_old_values + (values - mb_old_values).clamp(
+                            -current_clip_coef, current_clip_coef
+                        )
                         value_loss_1 = (values - mb_returns).pow(2)
                         value_loss_2 = (value_pred_clipped - mb_returns).pow(2)
                         value_loss = 0.5 * torch.max(value_loss_1, value_loss_2).mean()
@@ -605,11 +650,17 @@ def train_ppo(args):
                     entropy = dist.entropy().mean()
 
                     ratio = torch.exp(new_logprobs - mb_old_logprobs)
+                    log_ratio = new_logprobs - mb_old_logprobs
+                    approx_kl = ((ratio - 1.0) - log_ratio).mean()
                     pg_loss1 = -mb_adv * ratio
-                    pg_loss2 = -mb_adv * torch.clamp(ratio, 1.0 - cfg.clip_coef, 1.0 + cfg.clip_coef)
+                    pg_loss2 = -mb_adv * torch.clamp(
+                        ratio, 1.0 - current_clip_coef, 1.0 + current_clip_coef
+                    )
                     policy_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-                    value_pred_clipped = mb_old_values + (values - mb_old_values).clamp(-cfg.clip_coef, cfg.clip_coef)
+                    value_pred_clipped = mb_old_values + (values - mb_old_values).clamp(
+                        -current_clip_coef, current_clip_coef
+                    )
                     value_loss_1 = (values - mb_returns).pow(2)
                     value_loss_2 = (value_pred_clipped - mb_returns).pow(2)
                     value_loss = 0.5 * torch.max(value_loss_1, value_loss_2).mean()
@@ -624,6 +675,13 @@ def train_ppo(args):
                 policy_loss_epoch += policy_loss.item()
                 value_loss_epoch += value_loss.item()
                 entropy_epoch += entropy.item()
+                approx_kl_epoch += approx_kl.item()
+                kl_steps += 1
+                if approx_kl.item() > current_target_kl:
+                    stop_early_for_kl = True
+                    break
+            if stop_early_for_kl:
+                break
 
         steps_done = update * batch_size
         elapsed = time.time() - start
@@ -634,17 +692,23 @@ def train_ppo(args):
             print(
                 f"Update {update:4d}/{n_updates} | Steps: {steps_done:>9d} | SPS: {sps:>6d} | "
                 f"PolicyLoss: {policy_loss_epoch:.3f} | ValueLoss: {value_loss_epoch:.3f} | "
-                f"Entropy: {entropy_epoch:.3f} | LR: {current_lr:.2e} | EntCoef: {current_ent_coef:.4f} | "
+                f"Entropy: {entropy_epoch:.3f} | ApproxKL: {approx_kl_epoch / max(kl_steps, 1):.4f} | "
+                f"LR: {current_lr:.2e} | EntCoef: {current_ent_coef:.4f} | Clip: {current_clip_coef:.3f} | "
                 f"AvgTrainMaxTile: {max_tile_train:.1f}"
             )
+            if stop_early_for_kl:
+                print(f"Early stop update epoch due to KL threshold: {current_target_kl:.4f}")
 
         writer.add_scalar("Train/SPS", sps, update)
         writer.add_scalar("Train/PolicyLossSum", policy_loss_epoch, update)
         writer.add_scalar("Train/ValueLossSum", value_loss_epoch, update)
         writer.add_scalar("Train/EntropySum", entropy_epoch, update)
+        writer.add_scalar("Train/ApproxKL", approx_kl_epoch / max(kl_steps, 1), update)
         writer.add_scalar("Train/AdvantageMean", advantages.mean().item(), update)
         writer.add_scalar("Train/LearningRate", current_lr, update)
         writer.add_scalar("Train/EntropyCoef", current_ent_coef, update)
+        writer.add_scalar("Train/ClipCoef", current_clip_coef, update)
+        writer.add_scalar("Train/TargetKL", current_target_kl, update)
 
         if update % cfg.eval_every_updates == 0:
             eval_reward, eval_avg_tile, eval_best_tile, eval_metrics = evaluate_policy(
