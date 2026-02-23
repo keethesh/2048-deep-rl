@@ -274,10 +274,12 @@ class PPOConfig:
     gamma: float
     gae_lambda: float
     clip_coef: float
-    ent_coef: float
+    ent_coef_start: float
+    ent_coef_end: float
     vf_coef: float
     max_grad_norm: float
-    learning_rate: float
+    learning_rate_start: float
+    learning_rate_end: float
     eval_every_updates: int
     eval_episodes: int
     save_every_updates: int
@@ -298,10 +300,12 @@ def get_default_config(colab_profile):
             gamma=0.99,
             gae_lambda=0.95,
             clip_coef=0.2,
-            ent_coef=0.01,
+            ent_coef_start=0.01,
+            ent_coef_end=0.001,
             vf_coef=0.5,
             max_grad_norm=0.5,
-            learning_rate=3e-4,
+            learning_rate_start=3e-4,
+            learning_rate_end=5e-5,
             eval_every_updates=20,
             eval_episodes=20,
             save_every_updates=50,
@@ -319,10 +323,12 @@ def get_default_config(colab_profile):
         gamma=0.99,
         gae_lambda=0.95,
         clip_coef=0.2,
-        ent_coef=0.01,
+        ent_coef_start=0.01,
+        ent_coef_end=0.001,
         vf_coef=0.5,
         max_grad_norm=0.5,
-        learning_rate=3e-4,
+        learning_rate_start=3e-4,
+        learning_rate_end=5e-5,
         eval_every_updates=20,
         eval_episodes=10,
         save_every_updates=50,
@@ -336,6 +342,12 @@ def get_default_config(colab_profile):
 def apply_action_mask(logits, valid_mask):
     mask_value = torch.finfo(logits.dtype).min
     return logits.masked_fill(~valid_mask, mask_value)
+
+
+def linear_schedule(start_value, end_value, progress):
+    """Linear interpolation from start to end, progress in [0, 1]."""
+    p = float(np.clip(progress, 0.0, 1.0))
+    return start_value + p * (end_value - start_value)
 
 
 def evaluate_policy(model, device, n_episodes=10, seed=10_000):
@@ -364,7 +376,15 @@ def evaluate_policy(model, device, n_episodes=10, seed=10_000):
             max_tiles.append(int(np.max(env.board)))
 
     model.train()
-    return float(np.mean(rewards)), float(np.mean(max_tiles)), int(np.max(max_tiles))
+    max_tiles_np = np.array(max_tiles, dtype=np.int32)
+    metrics = {
+        "rate_256": float(np.mean(max_tiles_np >= 256)),
+        "rate_512": float(np.mean(max_tiles_np >= 512)),
+        "rate_1024": float(np.mean(max_tiles_np >= 1024)),
+        "rate_2048": float(np.mean(max_tiles_np >= 2048)),
+    }
+
+    return float(np.mean(rewards)), float(np.mean(max_tiles)), int(np.max(max_tiles)), metrics
 
 
 def train_ppo(args):
@@ -375,6 +395,8 @@ def train_ppo(args):
         cfg.total_timesteps = args.total_timesteps
     if args.n_envs is not None:
         cfg.n_envs = args.n_envs
+    if args.eval_episodes is not None:
+        cfg.eval_episodes = args.eval_episodes
 
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
@@ -399,7 +421,11 @@ def train_ppo(args):
     print(f"Colab profile: {colab_profile}")
     print(f"Total timesteps: {cfg.total_timesteps:,}")
     print(f"Envs: {cfg.n_envs} | Rollout steps: {cfg.rollout_steps} | Batch/update: {cfg.n_envs * cfg.rollout_steps}")
-    print(f"LR: {cfg.learning_rate} | Epochs: {cfg.update_epochs} | Minibatch: {cfg.minibatch_size}")
+    print(
+        f"LR: {cfg.learning_rate_start} -> {cfg.learning_rate_end} | "
+        f"Entropy: {cfg.ent_coef_start} -> {cfg.ent_coef_end} | "
+        f"Epochs: {cfg.update_epochs} | Minibatch: {cfg.minibatch_size}"
+    )
     print("=" * 72)
 
     envs = VecGame2048(cfg.n_envs, base_seed=cfg.seed)
@@ -418,7 +444,7 @@ def train_ppo(args):
     else:
         print("torch.compile: DISABLED")
 
-    optimizer = optim.Adam(model.parameters(), lr=cfg.learning_rate, eps=1e-5)
+    optimizer = optim.Adam(model.parameters(), lr=cfg.learning_rate_start, eps=1e-5)
 
     use_amp = device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda") if use_amp else None
@@ -430,10 +456,35 @@ def train_ppo(args):
     batch_size = cfg.n_envs * cfg.rollout_steps
     n_updates = cfg.total_timesteps // batch_size
     best_eval_tile = 0.0
+    start_update = 1
+    steps_done = 0
 
     start = time.time()
 
-    for update in range(1, n_updates + 1):
+    model_to_save = model._orig_mod if hasattr(model, "_orig_mod") else model
+
+    if args.resume is not None:
+        checkpoint = torch.load(args.resume, map_location=device)
+        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+            model_to_save.load_state_dict(checkpoint["model_state_dict"])
+            if "optimizer_state_dict" in checkpoint:
+                optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            start_update = int(checkpoint.get("update", 0)) + 1
+            best_eval_tile = float(checkpoint.get("best_eval_tile", 0.0))
+            steps_done = int(checkpoint.get("steps_done", 0))
+            print(f"Resumed from {args.resume} at update {start_update - 1}, steps {steps_done}.")
+        else:
+            # Backward compatibility: load model-only checkpoint
+            model_to_save.load_state_dict(checkpoint)
+            print(f"Loaded model-only checkpoint from {args.resume}. Optimizer state not restored.")
+
+    for update in range(start_update, n_updates + 1):
+        update_progress = update / max(n_updates, 1)
+        current_lr = linear_schedule(cfg.learning_rate_start, cfg.learning_rate_end, update_progress)
+        current_ent_coef = linear_schedule(cfg.ent_coef_start, cfg.ent_coef_end, update_progress)
+        for group in optimizer.param_groups:
+            group["lr"] = current_lr
+
         obs_buf = torch.zeros((cfg.rollout_steps, cfg.n_envs, 16, 4, 4), dtype=torch.float32, device=device)
         actions_buf = torch.zeros((cfg.rollout_steps, cfg.n_envs), dtype=torch.long, device=device)
         logprobs_buf = torch.zeros((cfg.rollout_steps, cfg.n_envs), dtype=torch.float32, device=device)
@@ -538,7 +589,7 @@ def train_ppo(args):
                         value_loss_2 = (value_pred_clipped - mb_returns).pow(2)
                         value_loss = 0.5 * torch.max(value_loss_1, value_loss_2).mean()
 
-                        loss = policy_loss + cfg.vf_coef * value_loss - cfg.ent_coef * entropy
+                        loss = policy_loss + cfg.vf_coef * value_loss - current_ent_coef * entropy
 
                     optimizer.zero_grad()
                     scaler.scale(loss).backward()
@@ -563,7 +614,7 @@ def train_ppo(args):
                     value_loss_2 = (value_pred_clipped - mb_returns).pow(2)
                     value_loss = 0.5 * torch.max(value_loss_1, value_loss_2).mean()
 
-                    loss = policy_loss + cfg.vf_coef * value_loss - cfg.ent_coef * entropy
+                    loss = policy_loss + cfg.vf_coef * value_loss - current_ent_coef * entropy
 
                     optimizer.zero_grad()
                     loss.backward()
@@ -583,7 +634,8 @@ def train_ppo(args):
             print(
                 f"Update {update:4d}/{n_updates} | Steps: {steps_done:>9d} | SPS: {sps:>6d} | "
                 f"PolicyLoss: {policy_loss_epoch:.3f} | ValueLoss: {value_loss_epoch:.3f} | "
-                f"Entropy: {entropy_epoch:.3f} | AvgTrainMaxTile: {max_tile_train:.1f}"
+                f"Entropy: {entropy_epoch:.3f} | LR: {current_lr:.2e} | EntCoef: {current_ent_coef:.4f} | "
+                f"AvgTrainMaxTile: {max_tile_train:.1f}"
             )
 
         writer.add_scalar("Train/SPS", sps, update)
@@ -591,9 +643,11 @@ def train_ppo(args):
         writer.add_scalar("Train/ValueLossSum", value_loss_epoch, update)
         writer.add_scalar("Train/EntropySum", entropy_epoch, update)
         writer.add_scalar("Train/AdvantageMean", advantages.mean().item(), update)
+        writer.add_scalar("Train/LearningRate", current_lr, update)
+        writer.add_scalar("Train/EntropyCoef", current_ent_coef, update)
 
         if update % cfg.eval_every_updates == 0:
-            eval_reward, eval_avg_tile, eval_best_tile = evaluate_policy(
+            eval_reward, eval_avg_tile, eval_best_tile, eval_metrics = evaluate_policy(
                 model=model,
                 device=device,
                 n_episodes=cfg.eval_episodes,
@@ -602,28 +656,39 @@ def train_ppo(args):
             writer.add_scalar("Eval/AvgReward", eval_reward, update)
             writer.add_scalar("Eval/AvgMaxTile", eval_avg_tile, update)
             writer.add_scalar("Eval/BestTile", eval_best_tile, update)
+            writer.add_scalar("Eval/Rate256", eval_metrics["rate_256"], update)
+            writer.add_scalar("Eval/Rate512", eval_metrics["rate_512"], update)
+            writer.add_scalar("Eval/Rate1024", eval_metrics["rate_1024"], update)
+            writer.add_scalar("Eval/Rate2048", eval_metrics["rate_2048"], update)
 
             print(
                 f"\n{'=' * 60}\n"
                 f"PPO EVALUATION (Update {update})\n"
                 f"Avg Reward: {eval_reward:.1f} | Avg Max Tile: {eval_avg_tile:.1f} | Best: {eval_best_tile}\n"
+                f"Rate>=256: {eval_metrics['rate_256']:.2%} | Rate>=512: {eval_metrics['rate_512']:.2%} | "
+                f"Rate>=1024: {eval_metrics['rate_1024']:.2%} | Rate>=2048: {eval_metrics['rate_2048']:.2%}\n"
                 f"{'=' * 60}\n"
             )
 
             if eval_avg_tile > best_eval_tile:
                 best_eval_tile = eval_avg_tile
                 os.makedirs("models", exist_ok=True)
-                model_to_save = model._orig_mod if hasattr(model, "_orig_mod") else model
                 torch.save(model_to_save.state_dict(), f"models/ppo_best_model_{int(best_eval_tile)}.pth")
                 print(f"New PPO best model saved: avg tile {best_eval_tile:.1f}")
 
         if update % cfg.save_every_updates == 0:
             os.makedirs("models", exist_ok=True)
-            model_to_save = model._orig_mod if hasattr(model, "_orig_mod") else model
-            torch.save(model_to_save.state_dict(), f"models/ppo_checkpoint_update{update}.pth")
+            checkpoint = {
+                "model_state_dict": model_to_save.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "update": update,
+                "steps_done": steps_done,
+                "best_eval_tile": best_eval_tile,
+                "config": cfg.__dict__,
+            }
+            torch.save(checkpoint, f"models/ppo_checkpoint_update{update}.pth")
 
     os.makedirs("models", exist_ok=True)
-    model_to_save = model._orig_mod if hasattr(model, "_orig_mod") else model
     torch.save(model_to_save.state_dict(), "models/ppo_final_model.pth")
     writer.close()
     print("PPO training complete.")
@@ -633,6 +698,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train PPO agent for 2048.")
     parser.add_argument("--total-timesteps", type=int, default=None, help="Override total timesteps.")
     parser.add_argument("--n-envs", type=int, default=None, help="Override number of parallel envs.")
+    parser.add_argument("--eval-episodes", type=int, default=None, help="Override evaluation episode count.")
+    parser.add_argument("--resume", type=str, default=None, help="Path to PPO checkpoint for resume.")
     return parser.parse_args()
 
 
