@@ -24,28 +24,28 @@ if FAST_MODE:
     NUM_EPISODES = 4000 if COLAB_SPEED_PROFILE else 5000
     BATCH_SIZE = 128 if COLAB_SPEED_PROFILE else 64
     LEARNING_RATE = 0.0003      # Higher with scheduler
-    EPSILON_DECAY = 0.9997     # Even slower exploration decay
+    EPSILON_DECAY = 0.9995 if COLAB_SPEED_PROFILE else 0.9997
     TARGET_UPDATE_FREQ = None   # Use soft updates instead
-    EVAL_FREQ = 250 if COLAB_SPEED_PROFILE else 100
-    EVAL_EPISODES = 3 if COLAB_SPEED_PROFILE else 10
+    EVAL_FREQ = 200 if COLAB_SPEED_PROFILE else 100
+    EVAL_EPISODES = 10 if COLAB_SPEED_PROFILE else 10
     SAVE_FREQ = 500 if COLAB_SPEED_PROFILE else 200
     LOG_FREQ = 25 if COLAB_SPEED_PROFILE else 20
     MEMORY_SIZE = 100000        # DOUBLED: More diverse experiences (was 50000)
-    TRAIN_FREQ = 8 if COLAB_SPEED_PROFILE else 4
+    TRAIN_FREQ = 4 if COLAB_SPEED_PROFILE else 4
     TAU = 0.005                 # Soft target update coefficient
     N_STEPS = 3                 # Multi-step returns
 else:
     NUM_EPISODES = 5000         # Full training
     BATCH_SIZE = 128 if COLAB_SPEED_PROFILE else 64
     LEARNING_RATE = 0.0003      # Higher with scheduler
-    EPSILON_DECAY = 0.9997     # Even slower exploration decay
+    EPSILON_DECAY = 0.9995 if COLAB_SPEED_PROFILE else 0.9997
     TARGET_UPDATE_FREQ = None   # Use soft updates instead
     EVAL_FREQ = 200 if COLAB_SPEED_PROFILE else 100
-    EVAL_EPISODES = 3 if COLAB_SPEED_PROFILE else 5
+    EVAL_EPISODES = 10 if COLAB_SPEED_PROFILE else 5
     SAVE_FREQ = 500 if COLAB_SPEED_PROFILE else 100
     LOG_FREQ = 25 if COLAB_SPEED_PROFILE else 10
     MEMORY_SIZE = 50000         # Large replay buffer
-    TRAIN_FREQ = 8 if COLAB_SPEED_PROFILE else 4
+    TRAIN_FREQ = 4 if COLAB_SPEED_PROFILE else 4
     TAU = 0.005                 # Soft target update coefficient
     N_STEPS = 3                 # Multi-step returns
 
@@ -89,7 +89,7 @@ PER_BETA_START = 0.4            # Importance sampling weight
 PER_BETA_FRAMES = 100000        # Frames to anneal beta to 1.0
 
 # Learning Rate Scheduler
-LR_SCHEDULER_T_0 = 1000         # Restart period for cosine annealing
+LR_SCHEDULER_T_0 = 4000 if COLAB_SPEED_PROFILE else 1000
 LR_SCHEDULER_T_MULT = 2         # Period multiplier after each restart
 LR_SCHEDULER_ETA_MIN = 1e-6     # Minimum learning rate
 
