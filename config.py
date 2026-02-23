@@ -3,6 +3,9 @@ FIXED Training Configuration - Copy this to config.py
 This configuration will actually allow the AI to learn!
 """
 
+import os
+import torch
+
 # ============================================================================
 # TRAINING MODE
 # ============================================================================
@@ -10,33 +13,41 @@ This configuration will actually allow the AI to learn!
 # Fast mode: Moderate training for testing (1-2 hours CPU, 15-25 min GPU)
 # Full mode: Complete training for best performance (3-5 hours CPU, 30-60 min GPU)
 FAST_MODE = True
+IS_COLAB = "COLAB_GPU" in os.environ
+COLAB_SPEED_PROFILE = IS_COLAB and torch.cuda.is_available()
 
 # ============================================================================
 # TRAINING HYPERPARAMETERS - FIXED FOR ACTUAL LEARNING
 # ============================================================================
 
 if FAST_MODE:
-    NUM_EPISODES = 5000         # INCREASED: Need more episodes to reach 2048
-    BATCH_SIZE = 32             # SMALLER = more stable updates (was 128)
-    LEARNING_RATE = 0.00003     # LOWER: More stable for complex strategies (was 0.00005)
-    EPSILON_DECAY = 0.9995      # MUCH SLOWER: Explore 5x longer to find 2048 strategies (was 0.998)
-    TARGET_UPDATE_FREQ = 5      # MORE FREQUENT = better sync (was 20)
-    EVAL_FREQ = 100             # Less frequent evaluation
-    EVAL_EPISODES = 10          # INCREASED: Better evaluation signal (was 3)
-    SAVE_FREQ = 200             # Less frequent saves
-    LOG_FREQ = 20               # Reduce console spam for longer training
+    NUM_EPISODES = 4000 if COLAB_SPEED_PROFILE else 5000
+    BATCH_SIZE = 128 if COLAB_SPEED_PROFILE else 64
+    LEARNING_RATE = 0.0003      # Higher with scheduler
+    EPSILON_DECAY = 0.9997     # Even slower exploration decay
+    TARGET_UPDATE_FREQ = None   # Use soft updates instead
+    EVAL_FREQ = 250 if COLAB_SPEED_PROFILE else 100
+    EVAL_EPISODES = 3 if COLAB_SPEED_PROFILE else 10
+    SAVE_FREQ = 500 if COLAB_SPEED_PROFILE else 200
+    LOG_FREQ = 25 if COLAB_SPEED_PROFILE else 20
     MEMORY_SIZE = 100000        # DOUBLED: More diverse experiences (was 50000)
+    TRAIN_FREQ = 8 if COLAB_SPEED_PROFILE else 4
+    TAU = 0.005                 # Soft target update coefficient
+    N_STEPS = 3                 # Multi-step returns
 else:
     NUM_EPISODES = 5000         # Full training
-    BATCH_SIZE = 64             # Standard batch size
-    LEARNING_RATE = 0.00005     # ❗ More conservative (was 0.0001)
-    EPSILON_DECAY = 0.997       # ❗ Slower decay (was 0.995)
-    TARGET_UPDATE_FREQ = 10     # Frequent target updates
-    EVAL_FREQ = 100             # Regular evaluation
-    EVAL_EPISODES = 5           # Moderate evaluation
-    SAVE_FREQ = 100             # Regular saves
-    LOG_FREQ = 10               # Moderate logging
+    BATCH_SIZE = 128 if COLAB_SPEED_PROFILE else 64
+    LEARNING_RATE = 0.0003      # Higher with scheduler
+    EPSILON_DECAY = 0.9997     # Even slower exploration decay
+    TARGET_UPDATE_FREQ = None   # Use soft updates instead
+    EVAL_FREQ = 200 if COLAB_SPEED_PROFILE else 100
+    EVAL_EPISODES = 3 if COLAB_SPEED_PROFILE else 5
+    SAVE_FREQ = 500 if COLAB_SPEED_PROFILE else 100
+    LOG_FREQ = 25 if COLAB_SPEED_PROFILE else 10
     MEMORY_SIZE = 50000         # Large replay buffer
+    TRAIN_FREQ = 8 if COLAB_SPEED_PROFILE else 4
+    TAU = 0.005                 # Soft target update coefficient
+    N_STEPS = 3                 # Multi-step returns
 
 # Common hyperparameters
 GAMMA = 0.99
@@ -48,11 +59,19 @@ EPSILON_MIN = 0.01              # LOWER: Allow more exploitation once strategies
 # ============================================================================
 
 if FAST_MODE:
-    CONV_FILTERS = 256          # DOUBLED: More pattern recognition for complex 2048 strategies (was 128)
-    FC_SIZE = 512               # DOUBLED: More decision-making capacity (was 256)
+    if COLAB_SPEED_PROFILE:
+        CONV_FILTERS = 128      # Better throughput on Colab GPUs
+        FC_SIZE = 256
+    else:
+        CONV_FILTERS = 256      # Higher-capacity default
+        FC_SIZE = 512
 else:
-    CONV_FILTERS = 256          # Larger, more powerful network
-    FC_SIZE = 512               # Larger fully connected layers
+    if COLAB_SPEED_PROFILE:
+        CONV_FILTERS = 128
+        FC_SIZE = 256
+    else:
+        CONV_FILTERS = 256
+        FC_SIZE = 512
 
 # ============================================================================
 # OPTIMIZATION SETTINGS
@@ -69,12 +88,21 @@ PER_ALPHA = 0.6                 # Priority exponent
 PER_BETA_START = 0.4            # Importance sampling weight
 PER_BETA_FRAMES = 100000        # Frames to anneal beta to 1.0
 
+# Learning Rate Scheduler
+LR_SCHEDULER_T_0 = 1000         # Restart period for cosine annealing
+LR_SCHEDULER_T_MULT = 2         # Period multiplier after each restart
+LR_SCHEDULER_ETA_MIN = 1e-6     # Minimum learning rate
+
+# Runtime acceleration options
+TORCH_COMPILE = True            # Use torch.compile when available (GPU only in trainer)
+TRACK_REWARD_COMPONENTS = False # Disable detailed reward breakdown during train for speed
+EVAL_DEBUG_ON_FIRST = False     # Avoid expensive verbose eval prints
+
 # ============================================================================
 # DEVICE SETTINGS
 # ============================================================================
 
 # Auto-detect best device
-import torch
 USE_CUDA = torch.cuda.is_available()
 DEVICE = "cuda" if USE_CUDA else "cpu"
 
@@ -125,14 +153,14 @@ def print_config():
     print("=" * 70)
     print(f"Mode: {'FAST (Testing)' if FAST_MODE else 'FULL (Production)'}")
     print(f"Device: {DEVICE.upper()}{' (CUDA)' if USE_CUDA else ' (CPU)'}")
+    print(f"Colab speed profile: {'ON' if COLAB_SPEED_PROFILE else 'OFF'}")
     print("-" * 70)
     print(f"Episodes: {NUM_EPISODES:,}")
     print(f"Batch Size: {BATCH_SIZE}")
-    print(f"Learning Rate: {LEARNING_RATE} (FIXED - was 0.0003)")
-    print(f"Memory Size: {MEMORY_SIZE:,} (FIXED - was 20000)")
-    print(f"Network Filters: {CONV_FILTERS} (FIXED - was 64)")
-    print(f"Epsilon Decay: {EPSILON_DECAY} (FIXED - was 0.99)")
-    print(f"Target Update Freq: {TARGET_UPDATE_FREQ} (FIXED - was 20)")
+    print(f"Learning Rate: {LEARNING_RATE}")
+    print(f"Memory Size: {MEMORY_SIZE:,}")
+    print(f"Network Filters: {CONV_FILTERS}")
+    print(f"Epsilon Decay: {EPSILON_DECAY}")
     print("-" * 70)
     print(f"Eval Frequency: Every {EVAL_FREQ} episodes ({EVAL_EPISODES} episodes)")
     print(f"Save Frequency: Every {SAVE_FREQ} episodes")
@@ -140,31 +168,40 @@ def print_config():
     print("-" * 70)
     print(f"Mixed Precision: {'Enabled' if USE_MIXED_PRECISION and USE_CUDA else 'Disabled'}")
     print(f"Gradient Clipping: {MAX_GRAD_NORM}")
+    print(f"Training Frequency: Every {TRAIN_FREQ} steps")
+    print(f"Soft Target Updates: tau={TAU}")
+    print(f"N-Step Returns: {N_STEPS}")
+    print(f"Learning Rate Scheduler: CosineAnnealingWarmRestarts")
+    print(f"torch.compile: {'Enabled' if TORCH_COMPILE else 'Disabled'}")
+    print(f"Track reward components: {'Enabled' if TRACK_REWARD_COMPONENTS else 'Disabled'}")
     print("=" * 70)
     print()
-    print("OPTIMIZATIONS FOR REACHING 2048:")
-    print("  - Episodes: 1000 -> 5000 (5x more training)")
-    print("  - Batch size: 128 -> 32 (more stable updates)")
-    print("  - Learning rate: 0.0003 -> 0.00003 (10x more stable)")
-    print("  - Epsilon decay: 0.998 -> 0.9995 (explores MUCH longer)")
-    print("  - Epsilon min: 0.05 -> 0.01 (more exploitation)")
-    print("  - Target update: 20 -> 5 (4x more frequent sync)")
-    print("  - Memory: 20k -> 100k (5x more diversity)")
-    print("  - Network: 64 -> 256 filters (4x capacity)")
-    print("  - FC size: 128 -> 512 (4x capacity)")
-    print("  - Eval episodes: 3 -> 10 (better evaluation signal)")
+    print("ADVANCED OPTIMIZATIONS:")
+    print("  - Double DQN: Reduces Q-value overestimation")
+    print("  - Soft Target Updates: Smooth Polyak averaging (tau={})".format(TAU))
+    print("  - N-Step Returns: {}-step TD learning for faster credit assignment".format(N_STEPS))
+    print("  - One-Hot State Encoding: 16-channel representation for precise tile values")
+    print("  - Batch Normalization: Training stability")
+    print("  - Tuned Rewards: Log-merge + potential delta + tile progress")
+    print("  - Learning Rate Scheduling: Cosine annealing with warm restarts")
     print("=" * 70)
     print()
 
 # Estimated training time
 if FAST_MODE:
     if USE_CUDA:
-        print(f"Estimated training time: 60-90 minutes (GPU)")
+        if COLAB_SPEED_PROFILE:
+            print(f"Estimated training time: 20-45 minutes (Colab GPU speed profile)")
+        else:
+            print(f"Estimated training time: 60-90 minutes (GPU)")
     else:
         print(f"Estimated training time: 4-6 hours (CPU)")
 else:
     if USE_CUDA:
-        print(f"Estimated training time: 30-60 minutes (GPU)")
+        if COLAB_SPEED_PROFILE:
+            print(f"Estimated training time: 30-60 minutes (Colab GPU speed profile)")
+        else:
+            print(f"Estimated training time: 30-60 minutes (GPU)")
     else:
         print(f"Estimated training time: 3-5 hours (CPU)")
 print()
